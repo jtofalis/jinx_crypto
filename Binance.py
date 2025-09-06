@@ -533,12 +533,11 @@ def run_cycle(cfg, state):
                     "amount": amount_bought,
                     "entry_price": entry_price,
                     "sl": entry_price - (atr_val * atr_mult),
+                    "initial_sl": entry_price - (atr_mult * atr_val)
                     "tp": entry_price + ((atr_val * atr_mult)*float(cfg.get("TAKE_RATIO",1.5))),
                     "initial_tp": entry_price + ((atr_val * atr_mult)*float(cfg.get("TAKE_RATIO",1.5))),
-                    "initial_sl": entry_price - (atr_mult * atr_val),
                     "locked_atr": atr_val,
                     "opened_at": datetime.now(timezone.utc).isoformat(),
-                    "halfway_tp_bumped":False
                 }
                 write_state(state)
                 msg = rf"{symbol} BUY executed {amount_bought:.8f} @ {entry_price:.6f} (notional ${notional:.2f})"
@@ -570,13 +569,13 @@ def run_cycle(cfg, state):
                     entry = pos["entry_price"]
                     initial_tp = pos["initial_tp"]
                     initial_sl = pos["initial_sl"]
-                    locked_atr =pos ["locked_atr"]
+                    locked_atr = pos["locked_atr"]
                     sl_distance = atr_mult * locked_atr
                     tp_distance = 2 * sl_distance
 
                     # progress from entry → TP (0 → 1)
                     progress = max(0.0, min(1.0, (last_price - entry) / (initial_tp - entry)))
-                    # exponential tightening curve
+                    # exponential tightening curve. I hvae made this just linear from the sl to tp as any exponential was overtaking current price before hitting the tp.
                     tightening_ratio = progress
 
                     new_sl = initial_sl + tightening_ratio * (initial_tp - initial_sl)
