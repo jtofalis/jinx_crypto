@@ -22,7 +22,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 import logging
 # ---------- CONFIG / FILES ----------
-PROJECT_DIR = os.path.expanduser("~/auto_trader/V3.6/")
+PROJECT_DIR = os.path.expanduser("~/auto_trader/V3.7/")
 STATE_FILE = os.path.join(PROJECT_DIR, "autotrader_state.json")
 TRADES_CSV = os.path.join(PROJECT_DIR, "autotrader_trades.csv")
 LOG_FILE = os.path.join(PROJECT_DIR, "autotrader.log")
@@ -299,54 +299,75 @@ def simple_sma(prices, n):
         return None
     return sum(prices[-n:]) / n
 
-def generate_signal_with_atr(klines, atr_period, atr_mult
-, ema_period):
+def generate_signal_with_atr(klines, atr_period, atr_mult, ema_period, pos):
     closes = [float(k[4]) for k in klines]
     highs = [float(k[2]) for k in klines]
     lows = [float(k[3]) for k in klines]
+    volumes = [float(k[5]) for k in klines]  # Binance candle volume
 
     if len(closes) < max(atr_period, ema_period) + 1:
-        return "HOLD"
+        return "HOLD", None, None, None
 
-    # Calculate ATR
+    # === ATR ===
     atr = calculate_atr(klines[:-1], period=int(CFG["ATR_PERIOD"]))
 
-    # Trend filter (EMA)
+    # === EMA ===
     alpha = 2 / (ema_period + 1)
     ema = closes[0]
     for price in closes[1:]:
         ema = alpha * price + (1 - alpha) * ema
 
+    # EMA slope (gradient)
+    ema_prev = sum(closes[-(ema_period + 1):-1]) / ema_period
+    ema_slope = (ema - ema_prev) / ema_prev * 100 if ema_prev != 0 else 0
+
+    # === High/Low levels ===
     recent_high = max(highs[-atr_period-1:-1])
     recent_low = min(lows[-atr_period-1:-1])
     last_close = closes[-1]
 
-    #SMA PERCENT DIFF CALCULATION
+    # === SMA diff ===
     min_diff_pct = float(CFG.get("MIN_DIFF_PCT", 0.1))
     f_curr = simple_sma(closes, int(CFG["FAST_SMA"]))
     s_curr = simple_sma(closes, int(CFG["SLOW_SMA"]))
 
     if f_curr is None or s_curr is None or s_curr == 0:
-        return "HOLD"
+        return "HOLD", recent_high, recent_low, atr
 
     diff_pct = ((f_curr - s_curr) / s_curr) * 100.0
 
-     # Debug logging
-    logger.info(
-        f"[ATR-SIGNAL] close={last_close:.2f}, ema={ema:.2f}, "
-        f"recent_high={recent_high:.2f}, recent_low={recent_low:.2f}, "
-        f"atr={atr:.2f}, mult={atr_mult}, "
-        f"buy_trigger={recent_high + atr_mult * atr:.2f}, "
-        f"sell_trigger={recent_low - atr_mult * atr:.2f}"
-    )
+    # === Volume baseline ===
+    avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else volumes[-1]
 
-    # Entry rules
-    if (last_close > recent_high + atr_mult * atr and last_close > ema) or (diff_pct >= min_diff_pct and last_close > ema):
-        return "BUY"
+    # === Debug logging ===
+    if pos is None:
+        logger.info(
+            f"[ATR-SIGNAL] close={last_close:.2f}, ema={ema:.2f}, "
+            f"recent_high={recent_high:.2f}, recent_low={recent_low:.2f}, "
+            f"atr={atr:.2f}, mult={atr_mult}, "
+            f"buy_trigger={recent_high + atr_mult * atr:.2f}, "
+            f"sell_trigger={recent_low - atr_mult * atr:.2f}, "
+            f"ema_slope={ema_slope:.4f}"
+        )
+
+    # ========================
+    # BUY Conditions
+    # ========================
+    if (last_close > recent_high + atr_mult * atr and last_close > ema) or (diff_pct >= min_diff_pct and ema_slope > 0):
+
+        return "BUY", recent_high, recent_low, atr
+
+    # ========================
+    # SELL Conditions
+    # ========================
     elif last_close < recent_low - atr_mult * atr and last_close < ema:
-        return "SELL"
+        return "SELL", recent_high, recent_low, atr
+
+    # ========================
+    # HOLD
+    # ========================
     else:
-        return "HOLD"
+        return "HOLD", recent_high, recent_low, atr
 
 def calculate_atr(klines, period=14):
     highs = [float(k[2]) for k in klines]
@@ -363,28 +384,43 @@ def calculate_atr(klines, period=14):
 
     return sum(trs[-period:]) / period if len(trs) >= period else None
 
-def update_dynamic_levels(state, current_price, tp_step=0.6, sl_step=0.8):
+def ema_crossover(closes, fast_period=7, slow_period=21):
     """
-    Adjusts take-profit and stop-loss dynamically when price moves up.
+    Detect EMA crossover signals.
 
     Args:
-        state (dict): current state for this symbol (buy_price, tp, sl).
-        current_price (float): latest market price.
-        tp_step (float): % distance for take profit (default 0.8%).
-        sl_step (float): % distance for stop loss (default 0.8%).
+        closes (list): List of closing prices.
+        fast_period (int): Fast EMA length.
+        slow_period (int): Slow EMA length.
 
     Returns:
-        dict: updated state with new tp and sl.
+        str: "BUY" if fast crosses above slow,
+             "SELL" if fast crosses below slow,
+             None if no crossover.
     """
-    if "buy_price" not in state or state["buy_price"] == 0:
-        return state  # nothing to update if not in trade
+    if len(closes) < slow_period + 2:
+        return None
 
-    # If price moves higher than last take-profit, raise both TP and SL
-    if current_price > state["tp"]:
-        state["tp"] = current_price * (1 + tp_step / 100)
-        state["sl"] = current_price * (1 - (sl_step/2) / 100)
+    def ema(prices, period):
+        k = 2 / (period + 1)
+        ema_vals = [sum(prices[:period]) / period]
+        for price in prices[period:]:
+            ema_vals.append(price * k + ema_vals[-1] * (1 - k))
+        return ema_vals
 
-    return state
+    fast_ema = ema(closes, fast_period)
+    slow_ema = ema(closes, slow_period)
+
+    # align
+    fast_ema = fast_ema[-len(slow_ema):]
+
+    if fast_ema[-2] <= slow_ema[-2] and fast_ema[-1] > slow_ema[-1]:
+        return "BUY"
+    elif fast_ema[-2] >= slow_ema[-2] and fast_ema[-1] < slow_ema[-1]:
+        return "SELL"
+    return None
+
+
 # ---------- State & logging ----------
 def read_state():
     if os.path.exists(STATE_FILE):
@@ -433,6 +469,8 @@ def summary_24h():
 
 # ---------- Engine ----------
 def run_cycle(cfg, state):
+    global SYMBOL_FILTERS
+    SYMBOL_FILTERS = load_symbol_filters()
     api_key = cfg["API_KEY"]
     api_secret = cfg["API_SECRET"]
     symbols = [s.strip().upper() for s in cfg["SYMBOLS"].split(",") if s.strip()]
@@ -450,15 +488,15 @@ def run_cycle(cfg, state):
             klines = fetch_klines(symbol, cfg["TIMEFRAME"], limit=60)
             atr = calculate_atr(klines)
             closes = [float(k[4]) for k in klines]
-            sig = generate_signal_with_atr(klines, atr_period=int(CFG["ATR_PERIOD"]), atr_mult=float(CFG["ATR_MULT"]), ema_period=int(CFG["EMA_PERIOD"]))
-            last_price = closes[-1]
             pos = state["positions"].get(symbol)
+            ema_signal = ema_crossover(closes, fast_period=int(CFG["ema_fast"]), slow_period=int(CFG["ema_slow"]))
+            sig, recent_high, recent_low, atr = generate_signal_with_atr(klines, atr_period=int(CFG["ATR_PERIOD"]), atr_mult=float(CFG["ATR_MULT"]), ema_period=int(CFG["EMA_PERIOD"]),pos=pos)
+            last_price = closes[-1]
             logging.info("%s: price=%.6f signal=%s pos=%s", symbol, last_price, sig, "OPEN" if pos else "NONE")
-
             min_diff_pct = float(cfg.get("MIN_DIFF_PCT", 0.1))
 
 
-            if sig == "BUY" and pos is None:
+            if (sig == "BUY" or ema_signal == "BUY") and pos is None:
                 # Market buy using quoteOrderQty to spend position_usd USDT
                 if dry_run:
                     # simulate execution: compute amount = position_usd / last_price
@@ -494,12 +532,16 @@ def run_cycle(cfg, state):
                 state["positions"][symbol] = {
                     "amount": amount_bought,
                     "entry_price": entry_price,
-                    "tp": entry_price + (atr_val * tp_mult),
                     "sl": entry_price - (atr_val * atr_mult),
+                    "tp": entry_price + ((atr_val * atr_mult)*float(cfg.get("TAKE_RATIO",1.5))),
+                    "initial_tp": entry_price + ((atr_val * atr_mult)*float(cfg.get("TAKE_RATIO",1.5))),
+                    "initial_sl": entry_price - (atr_mult * atr_val),
+                    "locked_atr": atr_val,
                     "opened_at": datetime.now(timezone.utc).isoformat(),
+                    "halfway_tp_bumped":False
                 }
                 write_state(state)
-                msg = f"{symbol} BUY executed {amount_bought:.8f} @ {entry_price:.6f} (notional ${notional:.2f})"
+                msg = rf"{symbol} BUY executed {amount_bought:.8f} @ {entry_price:.6f} (notional ${notional:.2f})"
                 logging.info(msg)
                 notify("Trade Placed", msg)
                 append_trade({
@@ -518,11 +560,106 @@ def run_cycle(cfg, state):
                 amount = float(pos["amount"])
                 entry = float(pos["entry_price"])
 
-                # ATR-based trailing SL
+                # ---------- ATR-based Trailing SL / TP ----------
                 atr_period = int(cfg.get("ATR_PERIOD", 14))
                 atr_mult = float(cfg.get("ATR_MULTIPLIER", 2.0))
-                atr_val = calculate_atr(klines, atr_period)
 
-                if atr_val is not None and last_price > entry:
-                    new_sl = last_price - (atr_val * atr_mult)
-                
+                atr_val = pos["locked_atr"]
+                if atr_val is not None and last_price > pos["entry_price"]:
+                    old_tp = pos.get("tp", pos["entry_price"])
+                    entry = pos["entry_price"]
+                    initial_tp = pos["initial_tp"]
+                    initial_sl = pos["initial_sl"]
+                    locked_atr =pos ["locked_atr"]
+                    sl_distance = atr_mult * locked_atr
+                    tp_distance = 2 * sl_distance
+
+                    # progress from entry → TP (0 → 1)
+                    progress = max(0.0, min(1.0, (last_price - entry) / (initial_tp - entry)))
+                    # exponential tightening curve
+                    tightening_ratio = progress
+
+                    new_sl = initial_sl + tightening_ratio * (initial_tp - initial_sl)
+
+
+                    if new_sl > pos["sl"]:
+                        #pos["tp"]=last_price + ((atr_val*float(cfg.get("TAKE_RATIO"))) * atr_mult)
+                        pos["sl"]=new_sl
+                        logging.info(f"{symbol}: Raising SL to {pos['sl']:.6f} (ATR-based)")
+
+                        # Persist state
+                        write_state(state)
+                # Check for exit conditions
+                should_exit = False
+                reason = ""
+                # Check if price has hit the Take-Profit or the Trailing Stop Loss
+                if last_price >= pos["tp"]:
+                    should_exit = True
+                    reason = "TP"
+                elif last_price <= pos["sl"]:
+                    should_exit = True
+                    reason = "SL"
+                elif sig == "SELL":
+                    should_exit = True
+                    reason = "FORCED EXIT"
+
+                if should_exit:
+                    if dry_run:
+                        exit_order = {"status": "SIMULATED", "executedQty": str(amount), "cummulativeQuoteQty": str(amount * last_price)}
+                        executed_qty = amount
+                    else:
+                        exit_order = safe_market_sell(api_key, api_secret, symbol, amount)
+                        if exit_order is None:
+                            # Skip this sell because quantity is below minQty
+                            logging.warning("%s: sell skipped, quantity below minQty", symbol)
+                            continue  # move to next symbol
+                        executed_qty = float(exit_order.get("executedQty", "0") or amount)
+                    exit_px = last_price
+                    pnl = (exit_px - entry) * amount
+                    msg = rf"{symbol} SELL {amount:.8f} @ {exit_px:.6f} ({reason}) PnL ${pnl:.2f}"
+                    logging.info(msg)
+                    notify("Trade Closed", msg)
+                    append_trade({
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "price": f"{exit_px:.6f}",
+                        "amount": f"{amount:.8f}",
+                        "notional_usd": f"{amount * exit_px:.2f}",
+                        "pnl_usd": f"{pnl:.2f}",
+                        "dry_run": str(dry_run),
+                    })
+                    # remove position
+                    del state["positions"][symbol]
+                    write_state(state)
+            else:
+                logging.debug("%s: HOLD", symbol)
+
+            # small sleep to not hit rate limits between symbols
+            time.sleep(0.8)
+
+        except Exception as e:
+            logging.exception("Error running symbol %s: %s", symbol, e)
+            notify("AutoTrader Error", f"{symbol}: {e}")
+            time.sleep(2)
+
+# ---------- Main ----------
+def main_loop():
+    # load env
+    load_env_file(ENV_FILE)
+
+    state = read_state()
+    notify("AutoTrader", f"Started (DRY_RUN={CFG.get('DRY_RUN')})")
+    logging.info("AutoTrader started with config: %s", {k: CFG[k] for k in ("SYMBOLS","POSITION_USD","FAST_SMA","SLOW_SMA","TIMEFRAME","POLL_SECONDS","DRY_RUN")})
+
+    try:
+        while True:
+            run_cycle(CFG, state)
+            # daily summary: run at configured time? keep simple: summary every 24 hours by timer
+            time.sleep(max(5, int(CFG.get("POLL_SECONDS", 30))))
+    except KeyboardInterrupt:
+        logging.info("Interrupted by user, exiting.")
+        notify("AutoTrader", "Stopped by user")
+
+if __name__ == "__main__":
+    main_loop()
