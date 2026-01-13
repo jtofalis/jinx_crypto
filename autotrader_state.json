@@ -1,0 +1,66 @@
+{
+  "crossover_state": {
+    "BTC/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    },
+    "ETH/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    },
+    "BNB/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    },
+    "SOL/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    },
+    "XRP/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    },
+    "ADA/USDT": {
+      "waiting_buy": false,
+      "waiting_sell": false
+    }
+  },
+  "cooldowns": {
+    "BTC/USDT": "2026-01-08T06:15:57.350480+00:00",
+    "SOL/USDT": "2026-01-10T22:13:48.848528+00:00",
+    "ETH/USDT": "2026-01-08T06:27:02.284314+00:00",
+    "XRP/USDT": "2026-01-07T15:21:06.505369+00:00",
+    "BNB/USDT": "2026-01-09T01:34:09.959196+00:00",
+    "ADA/USDT": "2026-01-07T20:25:40.115850+00:00"
+  },
+  "positions": {
+    "XRP/USDT": {
+      "amount": 6.8,
+      "entry_price": 2.1903,
+      "sl": 2.1,
+      "initial_sl": 2.146494,
+      "tp": 2.2806731651785714,
+      "initial_tp": 2.2806731651785714,
+      "locked_atr": 0.024135714285714278,
+      "risk": 0.06033928571428569,
+      "opened_at": "2026-01-07T15:22:16.680772+00:00",
+      "buy_signal": "ML_STRATEGY",
+      "highest_since_entry": 2.2302,
+      "last_ema_slope": 0.0,
+      "ml_probability": 0.6065748954132651,
+      "sl_stage": "DEVELOPING",
+      "sl_updates": 15,
+      "last_sl_info": {
+        "old_sl": 2.1,
+        "new_sl": 2.1,
+        "progress": 0.441502739459884,
+        "stage": "DEVELOPING",
+        "atr_val": 0.024135714285714278,
+        "reversal_detected": true,
+        "reversal_strength": 0.35,
+        "pnl_pct": -0.6391818472355492
+      }
+    }
+  },
+  "_last_write": 1768083228.8575833
+}
